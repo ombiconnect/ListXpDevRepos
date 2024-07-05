@@ -1,11 +1,16 @@
-﻿using LibGit2Sharp;
-using System;
-using System.Collections.Generic;
+﻿using System;
+using System.Diagnostics;
 using System.IO;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
 using System.Threading.Tasks;
+using Newtonsoft.Json.Linq;
 
 class Program
 {
+    static HttpClient client = new HttpClient();
+
     static async Task Main(string[] args)
     {
         string xpDevBaseUrl = "https://iconnect.xp-dev.com/api/v1"; // XPDev API base URL
@@ -14,210 +19,194 @@ class Program
         string azureDevOpsProject = "Repos"; // Replace with your Azure DevOps project name
         string azureDevOpsToken = "jz74m2hym3x3oegf7zrkzc4hvabxa3z5sfqx5n6oul5dwhvwjd4q"; // Replace with your Azure DevOps PAT
 
-        await ListProjects(xpDevBaseUrl, xpDevToken, azureDevOpsOrganization, azureDevOpsProject, azureDevOpsToken);
+        client.DefaultRequestHeaders.Add("X-XPDevToken", xpDevToken);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.ASCII.GetBytes($":{azureDevOpsToken}")));
+
+        await ListProjects(xpDevBaseUrl, azureDevOpsOrganization, azureDevOpsProject);
     }
 
-    static async Task ListProjects(string xpDevBaseUrl, string xpDevToken, string azureDevOpsOrganization, string azureDevOpsProject, string azureDevOpsToken)
+    static async Task ListProjects(string xpDevBaseUrl, string azureDevOpsOrganization, string azureDevOpsProject)
     {
-        using (HttpClient client = new HttpClient())
+        string projectsUrl = $"{xpDevBaseUrl}/projects";
+
+        HttpResponseMessage response = await client.GetAsync(projectsUrl);
+
+        if (response.IsSuccessStatusCode)
         {
-            client.DefaultRequestHeaders.Add("X-XPDevToken", xpDevToken);
-
-            string projectsUrl = $"{xpDevBaseUrl}/projects";
-            HttpResponseMessage response = await client.GetAsync(projectsUrl);
-
-            if (response.IsSuccessStatusCode)
+            string projectsJson = await response.Content.ReadAsStringAsync();
+            JArray projectsArray = JArray.Parse(projectsJson);
+            foreach (var project in projectsArray)
             {
-                string projectsJson = await response.Content.ReadAsStringAsync();
-                dynamic projects = Newtonsoft.Json.JsonConvert.DeserializeObject(projectsJson);
-                List<dynamic> projectList = ((IEnumerable<dynamic>)projects).ToList();
-
-                // Reverse the collection of projects
-                projectList.Reverse();
-                foreach (var project in projectList)
-                {
-                    string projectId = project.id;
-                    string projectName = project.name;
-                    await ListRepositories(xpDevBaseUrl, xpDevToken, azureDevOpsOrganization, azureDevOpsProject, projectName, projectId, azureDevOpsToken);
-                }
+                string projectId = project["id"].ToString();
+                string projectName = project["name"].ToString();
+                await ListRepositories(xpDevBaseUrl, azureDevOpsOrganization, azureDevOpsProject, projectName, projectId);
             }
         }
     }
 
-    static async Task ListRepositories(string xpDevBaseUrl, string xpDevToken, string azureDevOpsOrganization, string azureDevOpsProject, string projectName, string projectId, string azureDevOpsToken)
+    static async Task ListRepositories(string xpDevBaseUrl, string azureDevOpsOrganization, string azureDevOpsProject, string projectName, string projectId)
     {
-        using (HttpClient client = new HttpClient())
+        string repositoriesUrl = $"{xpDevBaseUrl}/repositories/project/{projectId}";
+
+        HttpResponseMessage response = await client.GetAsync(repositoriesUrl);
+
+        if (response.IsSuccessStatusCode)
         {
-            client.DefaultRequestHeaders.Add("X-XPDevToken", xpDevToken);
+            string repositoriesJson = await response.Content.ReadAsStringAsync();
+            JArray repositoriesArray = JArray.Parse(repositoriesJson);
 
-            string repositoriesUrl = $"{xpDevBaseUrl}/repositories/project/{projectId}";
-            HttpResponseMessage response = await client.GetAsync(repositoriesUrl);
-
-            if (response.IsSuccessStatusCode)
+            foreach (var repository in repositoriesArray)
             {
-                string repositoriesJson = await response.Content.ReadAsStringAsync();
-                dynamic repositories = Newtonsoft.Json.JsonConvert.DeserializeObject(repositoriesJson);
+                string repoName = repository["name"].ToString();
+                string repoType = repository["type"].ToString();
 
-                foreach (var repository in repositories)
+                if (repoType.Equals("Git", StringComparison.OrdinalIgnoreCase))
                 {
-                    string repoName = repository.name;
-                    string repoType = repository.type;
-
-                    if (repoType.Equals("Git", StringComparison.OrdinalIgnoreCase))
+                    if (repoName == "rec-trac-ui")
                     {
-                        Console.WriteLine($"ProjectName = {projectName}");
+                        Console.WriteLine("_________________________________________________________________________________________________________");
+                        Console.WriteLine($"ProjectName: {projectName}");
+                        Console.WriteLine($"RepoName: {repoName}");
 
-                        if (repoName == "Native_Frontend")
-                        {
-                            Console.WriteLine("_________________________________________________________________________________________________________");
+                        string cloneResult = await CloneAndPushGitRepository(projectName, repoName, azureDevOpsOrganization, azureDevOpsProject);
 
-                            Console.WriteLine($"RepoName = {repoName}");
-
-                            string cloneDir = Path.Combine("D:\\XpDevRepositories", projectName, repoName);
-
-                            string isClone = await CloneGitRepository(repoName, cloneDir, $"https://iconnect.xp-dev.com/git/{repoName}");
-                            Console.WriteLine($"IsClone = {isClone}");
-
-            
-                                string isFetched = await FetchFromAzureDevOps(cloneDir, "origin", new[] { "+refs/heads/*:refs/remotes/origin/*" }, azureDevOpsToken, "Fetching all branches");
-                                Console.WriteLine($"IsFetched = {isFetched}");
-
-                                string isPulled = await PullFromAzureDevOps(cloneDir, azureDevOpsToken);
-                                Console.WriteLine($"IsPulled = {isPulled}");
-
-                                string isPushed = await PushToAzureDevOps(cloneDir, azureDevOpsOrganization, azureDevOpsProject, repoName, azureDevOpsToken);
-                                Console.WriteLine($"IsPushed = {isPushed}");
-                            
-
-                            Console.WriteLine("_________________________________________________________________________________________________________");
-                        }
+                        Console.WriteLine($"Clone and Push Result: {cloneResult}");
+                        Console.WriteLine("_________________________________________________________________________________________________________");
                     }
                 }
             }
         }
     }
 
-    static async Task<string> CloneGitRepository(string repoName, string cloneDir, string remoteUrl)
+    static async Task<string> CloneAndPushGitRepository(string projectName, string repoName, string organization, string project)
     {
+        string baseDir = "D:\\XpDevRepositories";
+        string cloneDir = Path.Combine(baseDir, projectName, repoName);
+        string azureRepoUrl = $"https://dev.azure.com/{organization}/{project}/_git/{repoName}";
+
         try
         {
-            // Check if the directory already exists and is not empty
-            if (Directory.Exists(cloneDir) && Directory.EnumerateFileSystemEntries(cloneDir).Any())
+            // Clone repository
+            ProcessStartInfo cloneInfo = new ProcessStartInfo
             {
-                return $"false: Directory '{cloneDir}' already exists and is not empty";
-            }
+                FileName = @"C:\Program Files\Git\bin\git.exe",
+                Arguments = $"clone --depth=1 https://iconnect.xp-dev.com/git/{repoName} {cloneDir}",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
 
-            // Clean up the directory if it exists
-            if (Directory.Exists(cloneDir))
+            using (Process cloneProcess = Process.Start(cloneInfo))
             {
-                Directory.Delete(cloneDir, true);
-            }
-
-            // Create the clone directory
-            Directory.CreateDirectory(cloneDir);
-
-            // Clone the repository
-            Repository.Clone(remoteUrl, cloneDir);
-
-            return "true";
-        }
-        catch (Exception ex)
-        {
-            return $"false: {ex.Message}";
-        }
-    }
-
-    static async Task<string> FetchFromAzureDevOps(string cloneDir, string remote, IEnumerable<string> refspecs, string azureDevOpsToken, string logMessage)
-    {
-        try
-        {
-            using (var repo = new Repository(cloneDir))
-            {
-                var fetchOptions = new FetchOptions
+                if (cloneProcess != null)
                 {
-                    CredentialsProvider = (url, usernameFromUrl, types) =>
-                        new UsernamePasswordCredentials
-                        {
-                            Username = "iconnectsolutions",
-                            Password = azureDevOpsToken
-                        }
-                };
+                    await cloneProcess.StandardOutput.ReadToEndAsync();
+                    await cloneProcess.StandardError.ReadToEndAsync();
+                    cloneProcess.WaitForExit();
 
-                Commands.Fetch(repo, remote, refspecs, fetchOptions, logMessage);
-            }
-
-            return "true";
-        }
-        catch (Exception ex)
-        {
-            return $"false: {ex.Message}";
-        }
-    }
-
-    static async Task<string> PullFromAzureDevOps(string cloneDir, string azureDevOpsToken)
-    {
-        try
-        {
-            using (var repo = new Repository(cloneDir))
-            {
-                // Set up the pull options
-                var pullOptions = new PullOptions
-                {
-                    FetchOptions = new FetchOptions
+                    if (cloneProcess.ExitCode != 0)
                     {
-                        CredentialsProvider = (url, usernameFromUrl, types) =>
-                            new UsernamePasswordCredentials
-                            {
-                                Username = "iconnectsolutions",
-                                Password = azureDevOpsToken
-                            }
-                    },
-                    MergeOptions = new MergeOptions()
-                };
-
-                // Pull changes from the remote
-                MergeResult mergeResult = Commands.Pull(repo, new Signature("Your Name", "your.email@example.com", DateTimeOffset.Now), pullOptions);
-
-                if (mergeResult.Status == MergeStatus.UpToDate)
-                {
-                    return "true";
-                }
-                else
-                {
-                    return $"false: Pull resulted in a non-up-to-date status ({mergeResult.Status})";
+                        return "false: Clone failed";
+                    }
                 }
             }
-        }
-        catch (Exception ex)
-        {
-            return $"false: {ex.Message}";
-        }
-    }
 
-    static async Task<string> PushToAzureDevOps(string cloneDir, string organization, string project, string repoName, string azureDevOpsToken)
-    {
-        try
-        {
-            using (var repo = new Repository(cloneDir))
+            // Fetch all remote branches
+            ProcessStartInfo fetchInfo = new ProcessStartInfo
             {
-                // Set remote URL for Azure DevOps repository
-                string remoteUrl = $"https://{organization}@dev.azure.com/{organization}/{project}/_git/{repoName}";
-                var remote = repo.Network.Remotes["origin"];
-                var pushOptions = new PushOptions
-                {
-                    CredentialsProvider = (url, usernameFromUrl, types) =>
-                        new UsernamePasswordCredentials
-                        {
-                            Username = "iconnectsolutions",
-                            Password = azureDevOpsToken
-                        }
-                };
+                FileName = @"C:\Program Files\Git\bin\git.exe",
+                Arguments = "fetch --all --tags",
+                WorkingDirectory = cloneDir,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
 
-                // Push all branches to Azure DevOps
-                repo.Network.Push(remote, @"refs/heads/*", pushOptions);
+            using (Process fetchProcess = Process.Start(fetchInfo))
+            {
+                if (fetchProcess != null)
+                {
+                    await fetchProcess.StandardOutput.ReadToEndAsync();
+                    await fetchProcess.StandardError.ReadToEndAsync();
+                    fetchProcess.WaitForExit();
+
+                    if (fetchProcess.ExitCode != 0)
+                    {
+                        return "false: Fetch failed";
+                    }
+                }
             }
 
-            return "true";
+            // List all remote branches
+            ProcessStartInfo listBranchesInfo = new ProcessStartInfo
+            {
+                FileName = @"C:\Program Files\Git\bin\git.exe",
+                Arguments = "branch -r",
+                WorkingDirectory = cloneDir,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using (Process listBranchesProcess = Process.Start(listBranchesInfo))
+            {
+                if (listBranchesProcess != null)
+                {
+                    string branchesOutput = await listBranchesProcess.StandardOutput.ReadToEndAsync();
+                    await listBranchesProcess.StandardError.ReadToEndAsync();
+                    listBranchesProcess.WaitForExit();
+
+                    if (listBranchesProcess.ExitCode != 0)
+                    {
+                        return "false: Failed to list branches";
+                    }
+
+                    // Split branches output by newline
+                    string[] branches = branchesOutput.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+
+                    // Push each branch to Azure DevOps
+                    foreach (var branch in branches)
+                    {
+                        if (branch.StartsWith("origin/") && !branch.Contains("HEAD ->"))
+                        {
+                            string branchName = branch.Substring("origin/".Length);
+
+                            ProcessStartInfo pushBranchInfo = new ProcessStartInfo
+                            {
+                                FileName = @"C:\Program Files\Git\bin\git.exe",
+                                Arguments = $"push origin {branchName}",
+                                WorkingDirectory = cloneDir,
+                                RedirectStandardOutput = true,
+                                RedirectStandardError = true,
+                                UseShellExecute = false,
+                                CreateNoWindow = true
+                            };
+
+                            using (Process pushBranchProcess = Process.Start(pushBranchInfo))
+                            {
+                                if (pushBranchProcess != null)
+                                {
+                                    await pushBranchProcess.StandardOutput.ReadToEndAsync();
+                                    await pushBranchProcess.StandardError.ReadToEndAsync();
+                                    pushBranchProcess.WaitForExit();
+
+                                    if (pushBranchProcess.ExitCode != 0)
+                                    {
+                                        return $"false: Push failed for branch {branchName}";
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    return "true: All branches pushed successfully";
+                }
+            }
+
+            return "false: Failed to list branches";
         }
         catch (Exception ex)
         {
